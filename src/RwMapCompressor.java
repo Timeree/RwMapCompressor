@@ -1,5 +1,3 @@
-
-
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -35,7 +33,7 @@ import java.util.zip.InflaterInputStream;
 
 /**
  @Author        Timeree
- @Version       1.1
+ @Version       1.1.2
  @Create Date   2024/02/26
  @Upgrade Date  2024/02/29
 */
@@ -104,32 +102,18 @@ public class RwMapCompressor {
             throw new RuntimeException("不支持的 encoding 类型：" + encodeType);
           }
           if (compressionType.equals("gzip")) {
-            ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
-            GZIPInputStream inputStream = new GZIPInputStream(new ByteArrayInputStream(mB64Decoder.decode(dataValue)));
-            byte[] outBuffer = new byte[1024];
-            int len;
-            while ((len = inputStream.read(outBuffer)) != -1) {
-              outputStream.write(outBuffer, 0, len);
-            }
-            buffer = ByteBuffer.wrap(outputStream.toByteArray());
+            buffer = decodeCompression("gzip", dataValue);
           } else if (compressionType.equals("zlib")) {
-            ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
-            InflaterInputStream inputStream = new InflaterInputStream(new ByteArrayInputStream(mB64Decoder.decode(dataValue)));
-            byte[] outBuffer = new byte[1024];
-            int len;
-            while ((len = inputStream.read(outBuffer)) != -1) {
-              outputStream.write(outBuffer, 0, len);
-            }
-            buffer = ByteBuffer.wrap(outputStream.toByteArray());
+            buffer = decodeCompression("zlib", dataValue);
           } else {
-            throw new RuntimeException("不支持的 compression 类型：" + compressionType);
+            throw new RuntimeException("不支持的 layer.data.compression 类型：" + compressionType);
           }
           buffer.order(ByteOrder.LITTLE_ENDIAN);
           for (int index = 0; index < (mapWidth * mapHeight); index++) {
             int res = buffer.getInt();
             if (res != 0) {
               if (!tileIds.containsKey(res) && res < 0) {
-                System.out.println("暂不支持旋转角度的地块 gid: " + res + ", 该地块会被忽略");
+                System.out.println("不支持小于 0 的地块 gid: " + res + " (使用了旋转角度?), 该地块会被忽略");
               }
               tileIds.put(res, true);
             }
@@ -212,6 +196,26 @@ public class RwMapCompressor {
     }
     return null;
   }
+  
+  private static ByteBuffer decodeCompression(String type, String dataValue) throws IOException {
+    InputStream inputStream;
+    ByteArrayInputStream byteInput = new ByteArrayInputStream(mB64Decoder.decode(dataValue));
+    ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+    if (type.equals("zlib")) {
+      inputStream = new InflaterInputStream(byteInput);
+    } else {
+      inputStream = new GZIPInputStream(byteInput);
+    }
+    byte[] outBuffer = new byte[1024];
+    int len;
+    while ((len = inputStream.read(outBuffer)) != -1) {
+      outputStream.write(outBuffer, 0, len);
+    }
+    ByteBuffer result = ByteBuffer.wrap(outputStream.toByteArray());
+    byteInput.close();
+    inputStream.close();
+    outputStream.close();
+    return result;
+  }
 
 }
-
