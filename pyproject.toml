@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rwmapcompressor"
+version = "2.0.0"
+description = "Rusted Warfare .tmx 地图压缩器"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dependencies = ["Pillow>=9.0"]
+
+[project.scripts]
+rwmapcompressor = "rwmapcompressor.cli:main"
+
+[tool.setuptools]
+packages = ["rwmapcompressor"]
