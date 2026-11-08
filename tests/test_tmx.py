@@ -30,9 +30,11 @@ class GidFlagsTest(unittest.TestCase):
         self.assertEqual(GID_MASK, 0x0FFFFFFF)
         self.assertEqual(FLAG_MASK, 0xF0000000)
 
-    def test_rotation_flags_are_distinct(self):
-        from rwmapcompressor.tmx import ROTATION_FLAGS
-        self.assertEqual(len(set(ROTATION_FLAGS.values())), 4)
+    def test_high_flag_gid_still_maps_to_base_tile(self):
+        """回归：带四个标志的 GID 仍应落到真实图块 7，而不是被当负数忽略。"""
+        for flags in (FLIP_H, FLIP_V, FLIP_D, ROT_HEX120,
+                      FLIP_H | FLIP_V | FLIP_D | ROT_HEX120):
+            self.assertEqual(split_gid(flags | 7), (7, flags))
 
 
 class LayerCodecTest(unittest.TestCase):
@@ -128,14 +130,12 @@ class MapModelTest(unittest.TestCase):
         self.assertEqual({g & GID_MASK for g in ground.gids if g},
                          {9, 2, 11, 4})
 
-    def test_apply_flags_keeps_base_gid(self):
-        tmx = TmxMap.from_bytes(build_tmx(flipped=False))
-        ground = tmx.layers[0]
-        before = [g & GID_MASK for g in ground.gids]
-        changed = ground.apply_flags(lambda _base: FLIP_H)
-        self.assertEqual(changed, 17)
-        self.assertEqual([g & GID_MASK for g in ground.gids], before)
-        self.assertTrue(all(g & FLIP_H for g in ground.gids if g))
+    def test_original_flags_are_never_modified_by_remap(self):
+        """remap（混淆用）只改真实 ID，原有旋转 / 翻转标志必须原样保留。"""
+        tmx = TmxMap.from_bytes(build_tmx(flipped=True))
+        before = [g & FLAG_MASK for g in tmx.layers[0].gids]
+        tmx.remap({1: 9, 3: 11})
+        self.assertEqual([g & FLAG_MASK for g in tmx.layers[0].gids], before)
 
     def test_to_bytes_is_reparseable(self):
         tmx = TmxMap.from_bytes(build_tmx())
@@ -148,6 +148,61 @@ class MapModelTest(unittest.TestCase):
             b'<layer name="Ground" width="9" height="8">', 1)
         with self.assertRaises(TmxError):
             TmxMap.from_bytes(raw)
+
+
+class MinifyTest(unittest.TestCase):
+    """XML 压缩必须只清空白 / 注释，不能碰任何地图数据。"""
+
+    ENCODINGS = (("base64", "gzip"), ("base64", "zlib"),
+                 ("base64", None), ("csv", None), ("xml", None))
+
+    def test_removes_whitespace_and_comments(self):
+        tmx = TmxMap.from_bytes(build_tmx(with_comment=True))
+        self.assertIn(b"<!--", tmx.to_bytes())
+        saved = tmx.minify()
+        compact = tmx.to_bytes()
+        self.assertGreater(saved, 0)
+        self.assertLess(len(compact), len(build_tmx(with_comment=True)))
+        self.assertNotIn(b"<!--", compact)
+        # 标签之间的缩进 / 换行被去掉
+        self.assertNotIn(b">\n <", compact)
+
+    def test_lossless_for_every_layer_encoding(self):
+        for encoding, compression in self.ENCODINGS:
+            with self.subTest(encoding=encoding, compression=compression):
+                raw = build_tmx(ground=encoding, ground_comp=compression,
+                                with_comment=True)
+                tmx = TmxMap.from_bytes(raw)
+                expected = [layer.gids[:] for layer in tmx.layers]
+                pngs = [ts.embedded_png.text
+                        for ts in tmx.tilesets if ts.embedded_png is not None]
+                tmx.minify()
+                again = TmxMap.from_bytes(tmx.to_bytes())
+                self.assertEqual([layer.gids[:] for layer in again.layers],
+                                 expected)
+                self.assertEqual(
+                    [ts.embedded_png.text for ts in again.tilesets
+                     if ts.embedded_png is not None], pngs)
+                self.assertEqual(again.used_gids, {1, 2, 3, 4, 17, 18, 33, 34})
+
+    def test_minify_is_idempotent(self):
+        tmx = TmxMap.from_bytes(build_tmx(with_comment=True))
+        first = tmx.to_bytes()
+        self.assertGreater(tmx.minify(), 0)
+        second = tmx.to_bytes()
+        self.assertEqual(tmx.minify(), 0)
+        self.assertEqual(second, tmx.to_bytes())
+        self.assertLess(len(second), len(first))
+
+    def test_csv_and_base64_text_survive_verbatim(self):
+        tmx = TmxMap.from_bytes(build_tmx(ground="csv", ground_comp=None))
+        data_texts = [(layer.name, layer.data.text) for layer in tmx.layers]
+        tmx.minify()
+        self.assertEqual([(layer.name, layer.data.text) for layer in tmx.layers],
+                         data_texts)
+        for name, text in data_texts:
+            self.assertIsNotNone(text, f"{name} 的图层数据不应被清空")
+            self.assertTrue(text.strip(), f"{name} 的图层数据不应只剩空白")
 
 
 if __name__ == "__main__":

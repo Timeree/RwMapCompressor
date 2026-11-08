@@ -4,6 +4,10 @@ Rusted Warfare 的地图是 Tiled 的 ``.tmx`` 文件：每个 ``<layer>`` 的 `
 是一串小端 uint32 的 Global Tile ID。最高的 4 个 bit 不是 ID 的一部分，而是
 翻转 / 旋转标志，解析后必须先清除才能定位到 tileset 里的图块。
 
+旧版 Java 实现把这些带标志的 GID 当成负数忽略，导致旋转过的图块对应的贴图
+被误当成「未使用」而抹成透明。本模块统一按无符号 32 位解析并剥离标志位，
+因此旋转图块始终被正确识别、保留 —— 这是默认行为，不需要开关。
+
 参考：https://doc.mapeditor.org/en/stable/reference/global-tile-ids/
 """
 
@@ -16,7 +20,6 @@ import xml.etree.ElementTree as ET
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 __all__ = [
     "FLIP_H",
@@ -25,7 +28,6 @@ __all__ = [
     "ROT_HEX120",
     "FLAG_MASK",
     "GID_MASK",
-    "ROTATION_FLAGS",
     "TmxError",
     "split_gid",
     "join_gid",
@@ -38,18 +40,10 @@ __all__ = [
 
 FLIP_H = 0x80000000        # 水平翻转
 FLIP_V = 0x40000000        # 垂直翻转
-FLIP_D = 0x20000000        # 对角翻转（配合 H/V 实现 90 度旋转）
+FLIP_D = 0x20000000        # 对角翻转（与 H/V 组合可表示 90/270 度旋转）
 ROT_HEX120 = 0x10000000    # 六边形地图 120 度旋转；普通地图也必须清除
 FLAG_MASK = FLIP_H | FLIP_V | FLIP_D | ROT_HEX120
 GID_MASK = 0x0FFFFFFF
-
-# Tiled 的 90 度旋转 = 先对角翻转，再水平 / 垂直翻转。
-ROTATION_FLAGS: dict[int, int] = {
-    0: 0,
-    90: FLIP_D | FLIP_H,
-    180: FLIP_H | FLIP_V,
-    270: FLIP_D | FLIP_V,
-}
 
 
 class TmxError(ValueError):
@@ -181,27 +175,6 @@ class Layer:
         self.gids = result
         encode_gids(self.data, self.gids, self.width)
 
-    def apply_flags(self, chooser: Callable[[int], int | None]) -> int:
-        """逐格设置翻转标志。
-
-        ``chooser(真实图块 ID)`` 返回新的标志值，返回 ``None`` 表示保持原样。
-        已有标志会被覆盖，真实图块 ID 不变。返回改动的格子数。
-        """
-        result: list[int] = []
-        changed = 0
-        for raw in self.gids:
-            base, _old = split_gid(raw)
-            flags = chooser(base) if base else None
-            if flags is None:
-                result.append(raw)
-            else:
-                result.append(join_gid(base, flags))
-                changed += 1
-        if changed:
-            self.gids = result
-            encode_gids(self.data, self.gids, self.width)
-        return changed
-
 
 @dataclass
 class Tileset:
@@ -328,6 +301,26 @@ class TmxMap:
     def remap(self, mapping: dict[int, int]) -> None:
         for layer in self.layers:
             layer.remap(mapping)
+
+    def minify(self) -> int:
+        """原地压缩 XML，返回节省的字节数。
+
+        只做无损的空白整理：删除标签之间的缩进 / 换行、删除注释节点。
+        判据是 ``strip()`` 后为空才清理，因此 ``<data>`` 的 csv / base64
+        文本、``<property>`` 里的内嵌 PNG base64、以及所有属性值都不会
+        被改动；输出仍是合法且数据完全一致的 TMX。
+        """
+        before = len(self.to_bytes())
+        for element in list(self.root.iter()):
+            # 注释 / 处理指令的 tag 不是字符串，删掉。
+            for child in list(element):
+                if not isinstance(child.tag, str):
+                    element.remove(child)
+            if element.text is not None and not element.text.strip():
+                element.text = None
+            if element.tail is not None and not element.tail.strip():
+                element.tail = None
+        return before - len(self.to_bytes())
 
     def to_bytes(self) -> bytes:
         return ET.tostring(self.root, encoding="utf-8", xml_declaration=True)

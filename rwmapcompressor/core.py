@@ -3,26 +3,24 @@
 三个可选能力互不依赖，可任意组合：
 
 ``ignore_units``  忽略 Units 层引用的图块（清空其贴图，但保留单位定义）
-``rotate``        主动给地形图块加上 Tiled 的旋转 / 翻转标志
 ``obfuscate``     打乱图块在图集中的位置并同步改写图层 GID，另做像素扰乱
+``minify_xml``    去掉 XML 的缩进 / 换行 / 注释，无损压缩文件体积
 
-无论开关如何，GID 的翻转 / 旋转标志始终会被正确剥离后再匹配图集，
-并在输出中原样保留 —— 这修掉了旧版把旋转地块当成负整数忽略的问题。
+另外，GID 的翻转 / 旋转标志始终会被正确剥离后再匹配图集，并在输出中
+原样保留 —— 这修掉了旧版把旋转地块当成负整数忽略、误删其贴图的问题。
+这是默认行为，不是开关：工具只保留地图里**本来就有**的旋转图块，不会
+主动给图块加旋转。
 """
 
 from __future__ import annotations
 
-import random
-import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
 from .atlas import Atlas, Grid
-from .tmx import FLAG_MASK, ROTATION_FLAGS, TmxMap
+from .tmx import FLAG_MASK, TmxMap
 
 __all__ = ["Options", "Stats", "compress"]
-
-_ROTATABLE_ANGLES = (90, 180, 270)
 
 
 @dataclass(frozen=True)
@@ -30,17 +28,9 @@ class Options:
     """所有开关集中在一处，方便测试与复用。"""
 
     ignore_units: bool = False
-    rotate: bool = False
-    rotate_angle: int = 0            # 0 表示逐格随机选 90/180/270
-    rotate_ratio: float = 1.0        # 参与旋转的格子比例
     obfuscate: bool = False
-    seed: int = 0                    # 混淆与旋转的随机种子，保证输出可复现
-
-    def __post_init__(self) -> None:
-        if self.rotate_angle not in (0, *_ROTATABLE_ANGLES):
-            raise ValueError("--rotate-angle 只能是 0 / 90 / 180 / 270")
-        if not 0.0 <= self.rotate_ratio <= 1.0:
-            raise ValueError("--rotate-ratio 必须在 0 到 1 之间")
+    minify_xml: bool = False
+    seed: int = 0                    # 混淆的随机种子，保证输出可复现
 
 
 @dataclass
@@ -51,12 +41,12 @@ class Stats:
     height: int = 0
     layer_count: int = 0
     used_gids: int = 0
-    flipped_cells: int = 0
+    flipped_cells: int = 0           # 地图里原有的旋转 / 翻转图块数（被保留）
     kept_tiles: int = 0
     removed_tile_nodes: int = 0
-    rotated_cells: int = 0
     remapped_gids: int = 0
     atlas_count: int = 0
+    xml_saved_bytes: int = 0
 
     @property
     def saved_bytes(self) -> int:
@@ -67,26 +57,6 @@ class Stats:
         if not self.input_size:
             return 0.0
         return self.saved_bytes / self.input_size * 100
-
-
-def _layer_seed(seed: int, name: str) -> int:
-    return seed ^ zlib.crc32(name.encode("utf-8"))
-
-
-def _apply_rotation(tmx: TmxMap, options: Options) -> int:
-    """给地形层逐格设置旋转标志；Units 层不参与（单位不该被旋转）。"""
-    changed = 0
-    for layer in tmx.terrain_layers():
-        rng = random.Random(_layer_seed(options.seed, layer.name))
-
-        def chooser(_base: int, *, _rng: random.Random = rng) -> int | None:
-            if _rng.random() > options.rotate_ratio:
-                return None
-            angle = options.rotate_angle or _rng.choice(_ROTATABLE_ANGLES)
-            return ROTATION_FLAGS[angle]
-
-        changed += layer.apply_flags(chooser)
-    return changed
 
 
 def compress(source: str | Path, target: str | Path,
@@ -115,11 +85,7 @@ def compress(source: str | Path, target: str | Path,
         used -= unit_gids
     stats.used_gids = len(used)
 
-    # 2. 可选的主动旋转（只改标志位，不影响图块归属）。
-    if options.rotate:
-        stats.rotated_cells = _apply_rotation(tmx, options)
-
-    # 3. 把使用中的 GID 归到各自的图块集。
+    # 2. 把使用中的 GID 归到各自的图块集。
     keep_by_ts: dict[int, set[int]] = {id(ts): set() for ts in tmx.tilesets}
     unit_local_by_ts: dict[int, set[int]] = {id(ts): set() for ts in tmx.tilesets}
     for gid in used:
@@ -131,7 +97,7 @@ def compress(source: str | Path, target: str | Path,
         if tileset is not None:
             unit_local_by_ts[id(tileset)].add(gid - tileset.first_gid)
 
-    # 4. 逐图块集重建内嵌图集、精简 <tile> 节点，并收集全局 GID 映射。
+    # 3. 逐图块集重建内嵌图集、精简 <tile> 节点，并收集全局 GID 映射。
     gid_map: dict[int, int] = {}
     for tileset in tmx.tilesets:
         keep = keep_by_ts[id(tileset)]
@@ -178,6 +144,9 @@ def compress(source: str | Path, target: str | Path,
         tmx.remap(gid_map)
         stats.remapped_gids = len(gid_map)
 
+    # 4. 可选的 XML 压缩（只清空白与注释，不动数据），然后序列化。
+    if options.minify_xml:
+        stats.xml_saved_bytes = tmx.minify()
     output = tmx.to_bytes()
     Path(target).write_bytes(output)
     stats.output_size = len(output)

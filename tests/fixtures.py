@@ -70,11 +70,13 @@ def _tileset(first_gid: int, name: str, tile_props: dict[int, str]) -> str:
 
 
 def build_tmx(*, ground: str = "base64", ground_comp: str | None = "gzip",
-              units: str = "csv", flipped: bool = True) -> bytes:
+              units: str = "csv", flipped: bool = True,
+              with_comment: bool = False) -> bytes:
     """构造一张 8x8 地图。
 
     Ground 用到 gid 1~4（其中部分带 Tiled 翻转标志），Items 用到 17/18，
     Units 用到 33/34。其余图块均未被引用，应被压缩掉。
+    ``with_comment`` 会在 <map> 内插入一条注释，用于验证 XML 压缩。
     """
     flag = 0x80000000 if flipped else 0
     ground_gids = [
@@ -99,11 +101,12 @@ def build_tmx(*, ground: str = "base64", ground_comp: str | None = "gzip",
                 f'<data{attrs}>{encode_layer(gids, encoding, compression)}</data>'
                 f'</layer>')
 
+    comment = "<!-- 由某地图编辑器生成 -->\n" if with_comment else ""
     xml = f'''<?xml version="1.0" encoding="UTF-8"?>
 <map version="1.9" tiledversion="1.9.1" orientation="orthogonal"
      renderorder="right-down" width="8" height="8" tilewidth="{TILE}"
      tileheight="{TILE}" infinite="0" nextlayerid="4" nextobjectid="1">
- {_tileset(GROUND_FIRST, "ground", {0: '<property name="water"/>',
+ {comment}{_tileset(GROUND_FIRST, "ground", {0: '<property name="water"/>',
                                     1: '<property name="cliff"/>',
                                     10: '<property name="unused"/>'})}
  {_tileset(ITEMS_FIRST, "items", {0: '<property name="res_pool"/>'})}

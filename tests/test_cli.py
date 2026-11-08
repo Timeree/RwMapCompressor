@@ -39,12 +39,31 @@ class CliTest(unittest.TestCase):
         target = Path(self.tmp.name) / "custom.tmx"
         with contextlib.redirect_stdout(io.StringIO()):
             code = main([str(self.src), "-o", str(target), "--ignore-units",
-                         "--rotate", "--obfuscate", "--seed", "4"])
+                         "--minify-xml", "--obfuscate", "--seed", "4"])
         self.assertEqual(code, 0)
         self.assertTrue(target.is_file())
+        self.assertNotIn(b"<!--", target.read_bytes())
         result = TmxMap.from_file(target)
         self.assertEqual(len(result.layers), 3)
         self.assertTrue(all(len(layer.gids) == 64 for layer in result.layers))
+
+    def test_minify_xml_flag(self):
+        plain = Path(self.tmp.name) / "plain.tmx"
+        compact = Path(self.tmp.name) / "compact.tmx"
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main([str(self.src), "-o", str(plain)]), 0)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main([str(self.src), "-o", str(compact),
+                                   "--minify-xml"]), 0)
+        self.assertLess(compact.stat().st_size, plain.stat().st_size)
+        self.assertEqual([layer.gids[:] for layer in TmxMap.from_file(compact).layers],
+                         [layer.gids[:] for layer in TmxMap.from_file(plain).layers])
+
+    def test_rotate_switch_no_longer_exists(self):
+        """主动旋转功能已移除，旧开关应被拒绝。"""
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                main([str(self.src), "--rotate"])
 
     def test_missing_input(self):
         stderr = io.StringIO()
